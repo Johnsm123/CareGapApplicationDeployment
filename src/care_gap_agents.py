@@ -1070,24 +1070,23 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
                 if hasattr(msg, "source") and msg.source != "user"
             }
 
-        # nest_asyncio makes asyncio loops re-entrant — needed because gunicorn
-        # gevent worker keeps an event loop running in the request thread.
-        # Without this, every bulk-process member except the first crashes
-        # with "asyncio.run() cannot be called from a running event loop".
+        # Each call gets its OWN fresh event loop. Required because:
+        #   (a) bulk-process spawns parallel threads — sharing a loop makes
+        #       AutoGen's SingleThreadedAgentRuntime tasks interleave and crash
+        #       with "Leaving task X does not match the current task Y".
+        #   (b) Gunicorn's gevent worker keeps a loop running on the main
+        #       thread, so plain asyncio.run() refuses to nest.
+        # Creating a fresh loop per call sidesteps both issues.
+        loop = asyncio.new_event_loop()
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-        except Exception:
-            pass
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_run())
+            return loop.run_until_complete(_run())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
 
     def _run_agent_single(self, agent, task: str) -> str:
         """
@@ -1106,24 +1105,23 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
             )
             return result.chat_message.content if result and result.chat_message else ""
 
-        # nest_asyncio makes asyncio loops re-entrant — needed because gunicorn
-        # gevent worker keeps an event loop running in the request thread.
-        # Without this, every bulk-process member except the first crashes
-        # with "asyncio.run() cannot be called from a running event loop".
+        # Each call gets its OWN fresh event loop. Required because:
+        #   (a) bulk-process spawns parallel threads — sharing a loop makes
+        #       AutoGen's SingleThreadedAgentRuntime tasks interleave and crash
+        #       with "Leaving task X does not match the current task Y".
+        #   (b) Gunicorn's gevent worker keeps a loop running on the main
+        #       thread, so plain asyncio.run() refuses to nest.
+        # Creating a fresh loop per call sidesteps both issues.
+        loop = asyncio.new_event_loop()
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-        except Exception:
-            pass
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_run())
+            return loop.run_until_complete(_run())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
