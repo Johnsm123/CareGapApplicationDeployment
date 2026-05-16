@@ -3001,8 +3001,12 @@ def landing_page():
     return _landing_html()
 
 
+def _frontend_url():
+    return os.environ.get("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+
 def _login_html():
-    return """<!DOCTYPE html>
+    return ("""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Login — HEDIS Care Gap Management</title>
@@ -3109,11 +3113,11 @@ window.addEventListener('DOMContentLoaded',()=>{
   }
 });
 </script>
-</body></html>"""
+</body></html>""").replace("http://localhost:5173", _frontend_url())
 
 
 def _landing_html():
-    return """<!DOCTYPE html>
+    return ("""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>HEDIS Care Gap Management — Cognizant</title>
@@ -3244,11 +3248,11 @@ body{font-family:'Segoe UI',system-ui,Roboto,'Helvetica Neue',sans-serif;backgro
   }catch(e){console.warn('Stats load failed:',e)}
 })();
 </script>
-</body></html>"""
+</body></html>""").replace("http://localhost:5173", _frontend_url())
 
 
 def _members_dashboard_html():
-    return """<!DOCTYPE html>
+    return ("""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Members Dashboard - HEDIS Care Gap</title>
@@ -3338,7 +3342,7 @@ function filterMembers(){
   ));
 }
 load();
-</script></body></html>"""
+</script></body></html>""").replace("http://localhost:5173", _frontend_url())
 
 
 def _bulk_upload_html():

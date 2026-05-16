@@ -213,7 +213,9 @@ def _portal_url(member_id: str) -> str:
         from src.member_portal import get_portal_url
         return get_portal_url(member_id)
     except Exception:
-        return f"http://localhost:5001/api/v1/portal/member/{member_id}"
+        import os
+        base = os.environ.get("PORTAL_BASE_URL", "http://localhost:5001").rstrip("/")
+        return f"{base}/api/v1/portal/member/{member_id}"
 
 
 def _send_email(to_addr: str, subject: str, html: str) -> bool:
