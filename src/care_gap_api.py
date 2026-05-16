@@ -2873,20 +2873,18 @@ def bulk_process_members():
         with semaphore:
             process_one(member_info)
 
-    threads = []
+    # Fire-and-forget: spawn threads and return immediately so the HTTP
+    # request finishes well under Azure App Service's 230-second front-door
+    # timeout. The threads keep running in the background; the frontend
+    # treats success as "outreach started" rather than "outreach completed".
     for m in member_list:
-        t = threading.Thread(target=process_one_with_limit, args=(m,))
+        t = threading.Thread(target=process_one_with_limit, args=(m,), daemon=True)
         t.start()
-        threads.append(t)
-
-    # Wait for all to finish (timeout 5 min per member)
-    for t in threads:
-        t.join(timeout=300)
 
     return jsonify({
         "status": "success",
-        "total_processed": len(processing_results),
-        "results": list(processing_results.values()),
+        "started": len(member_list),
+        "message": "Outreach started in background — emails will arrive shortly.",
     })
 
 
