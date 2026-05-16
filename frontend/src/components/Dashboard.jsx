@@ -344,19 +344,6 @@ function Dashboard({ onMemberSelect }) {
     };
   };
 
-  // ── Set default email for members without one ─────────────────────────────
-  const handleSetDefaultEmails = async () => {
-    try {
-      const res = await axios.post(`${API_BASE}/members/set-default-email`);
-      if (res.data.status === 'success') {
-        alert(`Updated ${res.data.updated_count} members with default email.`);
-        fetchDashboardData();
-      }
-    } catch (err) {
-      console.error('Set default email error:', err);
-    }
-  };
-
   // ── Filtering + sorting ───────────────────────────────────────────────────
   const filtered = members
     .filter(m => {
@@ -524,9 +511,6 @@ function Dashboard({ onMemberSelect }) {
         <div className="members-header-row">
           <h2 className="members-title">Members</h2>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button className="set-email-btn" onClick={handleSetDefaultEmails} title="Add default test email to members without one">
-              <Mail size={15} /> Set Default Emails
-            </button>
             <button
               className="add-member-btn"
               onClick={() => window.open(`${API_HOST}/api/v1/members/bulk-upload-page`, '_blank', 'noopener')}
