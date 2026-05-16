@@ -1070,16 +1070,24 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
                 if hasattr(msg, "source") and msg.source != "user"
             }
 
+        # nest_asyncio makes asyncio loops re-entrant — needed because gunicorn
+        # gevent worker keeps an event loop running in the request thread.
+        # Without this, every bulk-process member except the first crashes
+        # with "asyncio.run() cannot be called from a running event loop".
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+            import nest_asyncio
+            nest_asyncio.apply()
+        except Exception:
+            pass
 
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, _run()).result()
-        return asyncio.run(_run())
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_run())
 
     def _run_agent_single(self, agent, task: str) -> str:
         """
@@ -1098,16 +1106,24 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
             )
             return result.chat_message.content if result and result.chat_message else ""
 
+        # nest_asyncio makes asyncio loops re-entrant — needed because gunicorn
+        # gevent worker keeps an event loop running in the request thread.
+        # Without this, every bulk-process member except the first crashes
+        # with "asyncio.run() cannot be called from a running event loop".
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+            import nest_asyncio
+            nest_asyncio.apply()
+        except Exception:
+            pass
 
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, _run()).result()
-        return asyncio.run(_run())
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_run())
 
     # ── Public API ─────────────────────────────────────────────────────────────
 

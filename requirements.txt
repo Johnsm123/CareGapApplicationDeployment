@@ -20,3 +20,4 @@ gevent==24.2.1
 gevent-websocket==0.10.1
 flask-socketio==5.4.1
 firebase-admin==6.5.0
+nest-asyncio==1.6.0
