@@ -122,3 +122,38 @@ persona_demo/.env.persona-demo
 # Neo4j Aura credential dumps downloaded from console
 Neo4j-*.txt
 src/Neo4j-*.txt
+
+# ──────────────────────────────────────────────────────────────────────
+# NON-DEPLOYMENT artefacts — keep locally, exclude from the
+# deployment repo. The pipeline only needs runtime code:
+#   src/, config/, frontend/, requirements.txt, wsgi.py, startup.sh,
+#   .deployment, .gitignore, README.md, and (later) azure-pipelines.yml
+# Everything below is documentation, demo data, dev convenience,
+# admin scripts, or the separate mobile app — not part of the
+# Linux App Service or Static Web App deployment.
+# ──────────────────────────────────────────────────────────────────────
+
+# Architecture docs / diagrams (kept in the main dev repo, not deployed)
+ARCHITECTURE.md
+ARCHITECTURE_DIAGRAM.md
+GOLDEN_REFERENCE_IMPLEMENTATION.md
+HEDIS_2025_Complete_Rulebook.md
+hedis-architecture.html
+Actual_architecture_diagram.svg
+architecture_persona.svg
+architecture_simple.svg
+
+# Test data fixtures + bulk-upload templates (used in local dev only)
+*.xlsx
+
+# Windows dev convenience scripts
+*.bat
+
+# Separate mobile (Expo / React Native) app — has its own deployment
+mobile/
+
+# Persona-demo seeding scripts — one-shot setup, not runtime
+persona_demo/
+
+# Admin / migration scripts run by hand against the DBs — not runtime
+scripts/
