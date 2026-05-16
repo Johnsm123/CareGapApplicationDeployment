@@ -1,0 +1,124 @@
+# ──────────────────────────────────────────────────────────────────────
+# Secrets — NEVER COMMIT
+# ──────────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+frontend/.env
+frontend/.env.local
+mobile/.env
+mobile/.env.local
+
+# Firebase backend service-account key — TRUE secret, never commit
+firebase-admin.json
+
+# Note: mobile/google-services.json is intentionally NOT ignored.
+# It only contains client-side Firebase config (api_key, project_id, app_id) which
+# is embedded in every distributed APK and extractable by anyone — it is not a secret.
+# The TRUE secret for FCM push sending is firebase-admin.json above.
+
+# Any stray credential / key files
+*.pem
+*.key
+*_credentials.json
+*-admin-key.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ──────────────────────────────────────────────────────────────────────
+# Node / JavaScript
+# ──────────────────────────────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+mobile/node_modules/
+
+# ──────────────────────────────────────────────────────────────────────
+# Build output
+# ──────────────────────────────────────────────────────────────────────
+frontend/dist/
+frontend/build/
+mobile/dist/
+mobile/web-build/
+mobile/.expo/
+mobile/.expo-shared/
+mobile/android/build/
+mobile/ios/build/
+
+# Deployment artifacts
+deploy.zip
+*.tar.gz
+*.apk
+*.aab
+
+# ──────────────────────────────────────────────────────────────────────
+# Logs + caches
+# ──────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ──────────────────────────────────────────────────────────────────────
+# Project-specific output directories
+# ──────────────────────────────────────────────────────────────────────
+output/
+work/
+
+# ──────────────────────────────────────────────────────────────────────
+# Large reference documents (keep locally, don't push to GitHub)
+# ──────────────────────────────────────────────────────────────────────
+*.pdf
+*.pptx
+flask_output.txt
+
+# ──────────────────────────────────────────────────────────────────────
+# OS files
+# ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ──────────────────────────────────────────────────────────────────────
+# IDE
+# ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ──────────────────────────────────────────────────────────────────────
+# Azure CLI temp
+# ──────────────────────────────────────────────────────────────────────
+.azure/
+
+# ──────────────────────────────────────────────────────────────────────
+# Claude Code local settings
+# ──────────────────────────────────────────────────────────────────────
+.claude/
+
+# Persona-comparison demo (isolated) — real creds never committed
+persona_demo/.env.persona-demo
+
+# Backup of the previous git history kept locally for safety — never push
+.git.bak/
+
+# Microsoft Office lock files (start with ~$)
+~$*
+
+# Neo4j Aura credential dumps downloaded from console
+Neo4j-*.txt
+src/Neo4j-*.txt
