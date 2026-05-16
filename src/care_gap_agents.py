@@ -1070,23 +1070,35 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
                 if hasattr(msg, "source") and msg.source != "user"
             }
 
-        # Each call gets its OWN fresh event loop. Required because:
-        #   (a) bulk-process spawns parallel threads — sharing a loop makes
-        #       AutoGen's SingleThreadedAgentRuntime tasks interleave and crash
-        #       with "Leaving task X does not match the current task Y".
-        #   (b) Gunicorn's gevent worker keeps a loop running on the main
-        #       thread, so plain asyncio.run() refuses to nest.
-        # Creating a fresh loop per call sidesteps both issues.
-        loop = asyncio.new_event_loop()
+        # Run inside a REAL OS thread (not a gevent greenlet) so asyncio gets
+        # its own fresh event loop that isn't entangled with gunicorn's gevent
+        # worker. Without this, every bulk-process call after the first crashes
+        # with "Cannot run the event loop while another loop is running"
+        # because greenlets share the worker's main loop.
         try:
+            from gevent.monkey import get_original
+            RealThread = get_original("threading", "Thread")
+        except Exception:
+            from threading import Thread as RealThread
+
+        holder = {}
+        def _runner():
+            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_run())
-        finally:
             try:
-                loop.close()
-            except Exception:
-                pass
-            asyncio.set_event_loop(None)
+                holder["v"] = loop.run_until_complete(_run())
+            except BaseException as e:
+                holder["e"] = e
+            finally:
+                try: loop.close()
+                except Exception: pass
+
+        t = RealThread(target=_runner)
+        t.start()
+        t.join()
+        if "e" in holder:
+            raise holder["e"]
+        return holder.get("v", {})
 
     def _run_agent_single(self, agent, task: str) -> str:
         """
@@ -1105,23 +1117,35 @@ HEREDITARY RISK FLAG: [YES/NO — if YES, one-line reason]""",
             )
             return result.chat_message.content if result and result.chat_message else ""
 
-        # Each call gets its OWN fresh event loop. Required because:
-        #   (a) bulk-process spawns parallel threads — sharing a loop makes
-        #       AutoGen's SingleThreadedAgentRuntime tasks interleave and crash
-        #       with "Leaving task X does not match the current task Y".
-        #   (b) Gunicorn's gevent worker keeps a loop running on the main
-        #       thread, so plain asyncio.run() refuses to nest.
-        # Creating a fresh loop per call sidesteps both issues.
-        loop = asyncio.new_event_loop()
+        # Run inside a REAL OS thread (not a gevent greenlet) so asyncio gets
+        # its own fresh event loop that isn't entangled with gunicorn's gevent
+        # worker. Without this, every bulk-process call after the first crashes
+        # with "Cannot run the event loop while another loop is running"
+        # because greenlets share the worker's main loop.
         try:
+            from gevent.monkey import get_original
+            RealThread = get_original("threading", "Thread")
+        except Exception:
+            from threading import Thread as RealThread
+
+        holder = {}
+        def _runner():
+            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_run())
-        finally:
             try:
-                loop.close()
-            except Exception:
-                pass
-            asyncio.set_event_loop(None)
+                holder["v"] = loop.run_until_complete(_run())
+            except BaseException as e:
+                holder["e"] = e
+            finally:
+                try: loop.close()
+                except Exception: pass
+
+        t = RealThread(target=_runner)
+        t.start()
+        t.join()
+        if "e" in holder:
+            raise holder["e"]
+        return holder.get("v", {})
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
