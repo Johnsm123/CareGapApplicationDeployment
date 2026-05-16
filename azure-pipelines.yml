@@ -208,7 +208,7 @@ stages:
                 app_location: '/'
                 output_location: ''
                 skip_app_build: true
-                azure_static_web_apps_api_token: $(SWA_TOKEN_DEV)
+                azure_static_web_apps_api_token: $(SWA-TOKEN-DEV)
 
   - job: Smoke_Test_Dev
     displayName: 'Smoke test — dev API'
@@ -282,4 +282,4 @@ stages:
                 app_location: '/'
                 output_location: ''
                 skip_app_build: true
-                azure_static_web_apps_api_token: $(SWA_TOKEN_PROD)
+                azure_static_web_apps_api_token: $(SWA-TOKEN-PROD)
