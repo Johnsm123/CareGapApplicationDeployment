@@ -440,10 +440,16 @@ def sync_outreach_sent(member_id: str, care_gap_id: str = None,
 
 def sync_appointment_booked(member_id: str, care_gap_id: str,
                             appointment_id: str = "", appointment_date: str = "",
-                            lab_location: str = ""):
-    """Mark that an appointment has been booked for this gap."""
+                            lab_location: str = "", booked_at: str = ""):
+    """Mark that an appointment has been booked for this gap.
+
+    `booked_at` should be the actual booking timestamp (ISO string). If not
+    supplied, falls back to now() — but the reconcile flow that runs on every
+    page load MUST pass the original Appointment.created_at so we don't
+    overwrite the booking time with the page-view time.
+    """
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = booked_at or datetime.now().isoformat()
 
     # Verify the gap exists first
     check = ref.run_query(

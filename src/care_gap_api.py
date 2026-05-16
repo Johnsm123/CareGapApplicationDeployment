@@ -4564,7 +4564,8 @@ def reference_member_personas(member_id):
                        a.care_gap_id    AS care_gap_id,
                        a.appointment_date AS appointment_date,
                        a.lab_location   AS lab_location,
-                       a.status         AS status
+                       a.status         AS status,
+                       toString(a.created_at) AS booked_at
             """, {"mid": member_id})
             for appt in appointments:
                 cgid = appt.get("care_gap_id")
@@ -4592,6 +4593,7 @@ def reference_member_personas(member_id):
                         appointment_id=appt.get("appointment_id", ""),
                         appointment_date=appt.get("appointment_date", ""),
                         lab_location=appt.get("lab_location", ""),
+                        booked_at=appt.get("booked_at", "") or "",
                     )
 
                 # If appointment completed in original DB, close gap in ref DB
