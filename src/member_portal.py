@@ -50,8 +50,10 @@ def _verify_token(member_id: str, token: str) -> bool:
 
 def get_portal_url(member_id: str) -> str:
     """Return the base portal URL for a member (used when composing emails)."""
+    import os
+    base = os.environ.get("PORTAL_BASE_URL", "http://localhost:5001").rstrip("/")
     token = _make_token(member_id)
-    return f"http://localhost:5001/portal/{member_id}/{token}"
+    return f"{base}/portal/{member_id}/{token}"
 
 
 # ── Available time-slot generator ────────────────────────────────────────────
