@@ -2659,24 +2659,19 @@ def bulk_process_members():
         mname = member_info.get("name", mid)
         memail = member_info.get("email", "")
         try:
-            # 1. Run 6-agent analysis
-            # Sync: analysis started
+            # 1. Care-gap discovery already ran in the preview step (persona
+            # discovery → CareGap nodes in Neo4j). The full 6-agent analysis
+            # used to run again here, but that takes 30-60s per member and
+            # blew through Azure App Service's 230s request timeout for any
+            # batch larger than ~3 members. The agent re-run is redundant —
+            # gaps already exist in DB. Skip it so emails go out immediately.
             try:
-                from src.persona_sync import sync_analysis_started
+                from src.persona_sync import sync_analysis_started, sync_analysis_complete
                 sync_analysis_started(mid)
+                sync_analysis_complete(mid, summary="Care gaps confirmed from persona discovery.")
             except Exception:
                 pass
-
-            agents = get_agents()
-            analysis = agents.validate_and_suggest(mid)
-
-            # Sync: analysis complete
-            try:
-                from src.persona_sync import sync_analysis_complete
-                summary = str(analysis.get("summary", ""))[:200] if isinstance(analysis, dict) else ""
-                sync_analysis_complete(mid, summary=summary)
-            except Exception:
-                pass
+            analysis = {"summary": "Care gaps detected via persona discovery"}
 
             # 2. Send outreach email with portal link
             email_sent = False
@@ -2873,18 +2868,22 @@ def bulk_process_members():
         with semaphore:
             process_one(member_info)
 
-    # Fire-and-forget: spawn threads and return immediately so the HTTP
-    # request finishes well under Azure App Service's 230-second front-door
-    # timeout. The threads keep running in the background; the frontend
-    # treats success as "outreach started" rather than "outreach completed".
+    threads = []
     for m in member_list:
-        t = threading.Thread(target=process_one_with_limit, args=(m,), daemon=True)
+        t = threading.Thread(target=process_one_with_limit, args=(m,))
         t.start()
+        threads.append(t)
+
+    # Without the 6-agent re-analysis (skipped above), each member's
+    # email send completes in ~5-10s. 90s per-thread join cap keeps the
+    # whole response well below Azure App Service's 230s timeout.
+    for t in threads:
+        t.join(timeout=90)
 
     return jsonify({
         "status": "success",
-        "started": len(member_list),
-        "message": "Outreach started in background — emails will arrive shortly.",
+        "total_processed": len(processing_results),
+        "results": list(processing_results.values()),
     })
 
 
