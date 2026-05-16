@@ -11,7 +11,7 @@ import Neo4jGraph from './Neo4jGraph';
 import { useRealtimeEvents } from '../hooks/useRealtimeEvents';
 import './Dashboard.css';
 
-import { API_BASE } from '../lib/apiBase';
+import { API_BASE, API_HOST } from '../lib/apiBase';
 const PAGE_SIZE = 12;
 
 // Demo scope — Critical / Needs Attention / Compliant filters and the
@@ -529,7 +529,7 @@ function Dashboard({ onMemberSelect }) {
             </button>
             <button
               className="add-member-btn"
-              onClick={() => window.open('http://localhost:5001/api/v1/members/bulk-upload-page', '_blank', 'noopener')}
+              onClick={() => window.open(`${API_HOST}/api/v1/members/bulk-upload-page`, '_blank', 'noopener')}
             >
               <UserPlus size={17} /> Upload Patient Record
             </button>
