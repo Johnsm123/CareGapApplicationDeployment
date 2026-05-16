@@ -1,0 +1,285 @@
+# ─────────────────────────────────────────────────────────────────────
+# Care Gap Application — Build + Deploy pipeline
+# Triggered on push to main. Builds backend + frontend, deploys to dev
+# automatically, then waits for manual approval before deploying to prod.
+# ─────────────────────────────────────────────────────────────────────
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none   # don't auto-run on pull-requests
+
+variables:
+  # Variable group holding SWA_TOKEN_DEV and SWA_TOKEN_PROD (created in
+  # DevOps → Pipelines → Library). Both vars must be marked as secret.
+  - group: caregap-secrets
+
+  - name: pythonVersion
+    value: '3.12'
+  - name: nodeVersion
+    value: '20.x'
+
+  # Azure DevOps service connection name (ARM connection to your subscription)
+  - name: azureSubscription
+    value: 'azure-caregap'
+
+  # Resource names — must match what was created in STEP E2
+  - name: resourceGroup
+    value: 'rg-caregap-prod'
+  - name: apiDev
+    value: 'caregap-api-dev'
+  - name: apiProd
+    value: 'caregap-api-prod'
+  - name: webDev
+    value: 'caregap-web-dev'
+  - name: webProd
+    value: 'caregap-web-prod'
+
+  # Public URLs the frontend build needs at compile time (Vite reads
+  # VITE_API_BASE_URL from process.env during `npm run build`).
+  - name: apiDevUrl
+    value: 'https://caregap-api-dev.azurewebsites.net'
+  - name: apiProdUrl
+    value: 'https://caregap-api-prod.azurewebsites.net'
+
+  # Gunicorn startup command for App Service. Matches the repo's startup.sh
+  # but pins the bind port to 8000 (WEBSITES_PORT is set to 8000 on the app).
+  - name: startupCommand
+    value: 'gunicorn --bind=0.0.0.0:8000 --timeout 600 --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker --workers 1 wsgi:app'
+
+stages:
+
+# ─────────────────────────────────────────────────────────────────────
+# Stage 1 — Build backend + both frontend variants in parallel
+# ─────────────────────────────────────────────────────────────────────
+- stage: Build
+  displayName: 'Build'
+  jobs:
+
+  - job: Build_Backend
+    displayName: 'Backend — package zip'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(pythonVersion)
+        displayName: 'Use Python $(pythonVersion)'
+
+      - script: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        displayName: 'pip install -r requirements.txt'
+
+      - script: |
+          python -m py_compile $(find src config -name "*.py") wsgi.py
+        displayName: 'Syntax-check Python files'
+
+      - task: ArchiveFiles@2
+        displayName: 'Zip backend payload'
+        inputs:
+          rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/backend.zip'
+          replaceExistingArchive: true
+          # SCM_DO_BUILD_DURING_DEPLOYMENT=1 on App Service will reinstall
+          # requirements.txt on the target, so we don't ship the venv.
+          # We DO need src/, config/, requirements.txt, wsgi.py, startup.sh.
+          exclusionPatterns: |
+            frontend/**
+            mobile/**
+            persona_demo/**
+            scripts/**
+            **/__pycache__/**
+            **/*.pyc
+            venv/**
+            .git/**
+            .git.bak/**
+            .vscode/**
+            .idea/**
+            .claude/**
+            *.xlsx
+            *.pdf
+            *.pptx
+            *.svg
+            *.md
+            *.bat
+
+      - publish: '$(Build.ArtifactStagingDirectory)/backend.zip'
+        artifact: backend
+        displayName: 'Publish backend artifact'
+
+  - job: Build_Frontend_Dev
+    displayName: 'Frontend — build (dev API target)'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - task: NodeTool@0
+        inputs:
+          versionSpec: $(nodeVersion)
+        displayName: 'Use Node $(nodeVersion)'
+
+      - script: |
+          cd frontend
+          npm ci
+        displayName: 'npm ci'
+
+      - script: |
+          cd frontend
+          VITE_API_BASE_URL='$(apiDevUrl)' npm run build
+        displayName: 'Vite build → frontend/dist (dev API URL baked in)'
+
+      - publish: '$(System.DefaultWorkingDirectory)/frontend/dist'
+        artifact: frontend-dev
+        displayName: 'Publish dev frontend artifact'
+
+  - job: Build_Frontend_Prod
+    displayName: 'Frontend — build (prod API target)'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - task: NodeTool@0
+        inputs:
+          versionSpec: $(nodeVersion)
+
+      - script: |
+          cd frontend
+          npm ci
+        displayName: 'npm ci'
+
+      - script: |
+          cd frontend
+          VITE_API_BASE_URL='$(apiProdUrl)' npm run build
+        displayName: 'Vite build → frontend/dist (prod API URL baked in)'
+
+      - publish: '$(System.DefaultWorkingDirectory)/frontend/dist'
+        artifact: frontend-prod
+
+# ─────────────────────────────────────────────────────────────────────
+# Stage 2 — Deploy to DEV automatically
+# ─────────────────────────────────────────────────────────────────────
+- stage: Deploy_Dev
+  displayName: 'Deploy → dev'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+
+  - deployment: Deploy_Backend_Dev
+    displayName: 'Backend → caregap-api-dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: backend
+
+            - task: AzureWebApp@1
+              displayName: 'Deploy backend zip to App Service'
+              inputs:
+                azureSubscription: $(azureSubscription)
+                appType: 'webAppLinux'
+                appName: $(apiDev)
+                package: '$(Pipeline.Workspace)/backend/backend.zip'
+                runtimeStack: 'PYTHON|3.12'
+                startUpCommand: $(startupCommand)
+
+  - deployment: Deploy_Frontend_Dev
+    displayName: 'Frontend → caregap-web-dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: frontend-dev
+
+            - task: AzureStaticWebApp@0
+              displayName: 'Deploy dist/ to Static Web App'
+              inputs:
+                workingDirectory: '$(Pipeline.Workspace)/frontend-dev'
+                app_location: '/'
+                output_location: ''
+                skip_app_build: true
+                azure_static_web_apps_api_token: $(SWA_TOKEN_DEV)
+
+  - job: Smoke_Test_Dev
+    displayName: 'Smoke test — dev API'
+    pool:
+      vmImage: 'ubuntu-latest'
+    dependsOn: Deploy_Backend_Dev
+    steps:
+      - script: |
+          echo "Waiting 45s for App Service to warm up..."
+          sleep 45
+          set -e
+          for i in 1 2 3; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" $(apiDevUrl)/api/v1/members) || CODE=000
+            echo "Attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "Dev backend is live."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "Smoke test failed — backend did not return 200 after 3 retries."
+          exit 1
+        displayName: 'curl /api/v1/members'
+
+# ─────────────────────────────────────────────────────────────────────
+# Stage 3 — Deploy to PROD (manual approval via the 'prod' environment)
+# Configure approvals in: DevOps → Pipelines → Environments → prod
+# ─────────────────────────────────────────────────────────────────────
+- stage: Deploy_Prod
+  displayName: 'Deploy → prod (manual approval)'
+  dependsOn: Deploy_Dev
+  condition: succeeded()
+  jobs:
+
+  - deployment: Deploy_Backend_Prod
+    displayName: 'Backend → caregap-api-prod'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'prod'   # ← approval lives here
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: backend
+
+            - task: AzureWebApp@1
+              inputs:
+                azureSubscription: $(azureSubscription)
+                appType: 'webAppLinux'
+                appName: $(apiProd)
+                package: '$(Pipeline.Workspace)/backend/backend.zip'
+                runtimeStack: 'PYTHON|3.12'
+                startUpCommand: $(startupCommand)
+
+  - deployment: Deploy_Frontend_Prod
+    displayName: 'Frontend → caregap-web-prod'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'prod'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: frontend-prod
+
+            - task: AzureStaticWebApp@0
+              inputs:
+                workingDirectory: '$(Pipeline.Workspace)/frontend-prod'
+                app_location: '/'
+                output_location: ''
+                skip_app_build: true
+                azure_static_web_apps_api_token: $(SWA_TOKEN_PROD)
