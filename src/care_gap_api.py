@@ -3497,13 +3497,10 @@ body{font-family:'Segoe UI',system-ui,Roboto,'Helvetica Neue',sans-serif;backgro
 
 <div class="upload-area" id="uploadArea">
   <h2>Upload Patient Excel File</h2>
-  <p>Drag & drop your Excel file here, or click to browse.<br>
-     Required columns: <strong>Name, DOB, Gender, Email</strong><br>
-     Optional: Phone, PCPID, PlanID, ZIP, ChronicConditions, InsuranceType, EnrollmentStart, EnrollmentEnd, PriorScreenings (e.g. BCS:2025-06-15;COL:2024-03-20)</p>
   <input type="file" id="fileInput" accept=".xlsx,.xls">
   <button class="upload-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()">Choose Excel File</button>
-  <br><span class="template-link" onclick="downloadTemplate()">Download sample template</span>
   <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+  <div class="progress-pct" id="progressPct" style="display:none;text-align:center;font-size:13px;color:#000048;margin-top:6px;font-weight:600"></div>
   <div class="status-msg" id="statusMsg"></div>
 </div>
 
@@ -3575,21 +3572,38 @@ async function handleFile(){
   const btn=document.getElementById('uploadBtn');
   const bar=document.getElementById('progressBar');
   const fill=document.getElementById('progressFill');
+  const pct=document.getElementById('progressPct');
   const msg=document.getElementById('statusMsg');
 
   btn.disabled=true;btn.textContent='Uploading...';
-  bar.style.display='block';fill.style.width='30%';
+  bar.style.display='block';
+  pct.style.display='block';
   msg.textContent='Uploading and analyzing patient data...';
+  msg.style.color='';
+
+  // Progressive bar: smoothly climbs to ~90% over ~45s with an asymptote so
+  // it never stalls. Snaps to 100% the moment the backend response arrives.
+  let progress=2;
+  fill.style.width=progress+'%';
+  pct.textContent=progress+'%';
+  const tick=setInterval(()=>{
+    // remaining-distance curve: bigger jumps early, smaller near 90%
+    const remaining=90-progress;
+    if(remaining<=0.5)return;
+    progress=Math.min(90,progress+Math.max(0.4,remaining*0.025));
+    fill.style.width=progress.toFixed(1)+'%';
+    pct.textContent=Math.floor(progress)+'%';
+  },400);
 
   const formData=new FormData();
   formData.append('file',file);
 
   try{
-    fill.style.width='60%';
     const res=await fetch('/api/v1/members/bulk-upload',{method:'POST',body:formData});
-    fill.style.width='90%';
     const data=await res.json();
+    clearInterval(tick);
     fill.style.width='100%';
+    pct.textContent='100%';
 
     if(data.status==='error'){
       msg.textContent='Error: '+data.error;
@@ -3604,6 +3618,7 @@ async function handleFile(){
 
     setTimeout(()=>showPreview(uploadedMembers),500);
   }catch(e){
+    clearInterval(tick);
     msg.textContent='Upload failed: '+e.message;msg.style.color='#dc3545';
   }
   btn.disabled=false;btn.textContent='Choose Excel File';
