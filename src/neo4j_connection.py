@@ -32,24 +32,39 @@ class MedicalKnowledgeGraph:
             logger.info("Neo4j connection closed")
 
     def run_query(self, query: str, parameters: Optional[Dict] = None) -> List[Dict]:
-        """Execute a Cypher query and return results as a list of dicts."""
-        try:
-            with self.driver.session() as session:
-                result = session.run(query, parameters or {})
-                return result.data()
-        except Exception as e:
-            logger.error(f"Query execution failed: {str(e)}")
-            return []
+        """Execute a Cypher query and return results as a list of dicts.
+
+        Retries once on connection-level failures. Neo4j Aura drops idle
+        TCP connections after ~10 minutes, so the first query after an idle
+        period can hit a "defunct connection" error. The driver reconnects on
+        the next session call, so a single retry is enough to recover.
+        """
+        for attempt in range(2):
+            try:
+                with self.driver.session() as session:
+                    result = session.run(query, parameters or {})
+                    return result.data()
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"Query attempt 1 failed ({e}); retrying once")
+                    continue
+                logger.error(f"Query execution failed after retry: {str(e)}")
+                return []
 
     def execute_write(self, query: str, parameters: Optional[Dict] = None) -> bool:
-        """Execute a write Cypher statement."""
-        try:
-            with self.driver.session() as session:
-                session.run(query, parameters or {})
-                return True
-        except Exception as e:
-            logger.error(f"Write operation failed: {str(e)}")
-            return False
+        """Execute a write Cypher statement. Retries once on connection failure
+        (Aura drops idle connections — first call after idle can fail)."""
+        for attempt in range(2):
+            try:
+                with self.driver.session() as session:
+                    session.run(query, parameters or {})
+                    return True
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"Write attempt 1 failed ({e}); retrying once")
+                    continue
+                logger.error(f"Write operation failed after retry: {str(e)}")
+                return False
 
 
 # Global singletons

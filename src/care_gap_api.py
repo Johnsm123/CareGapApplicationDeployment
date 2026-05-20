@@ -2676,6 +2676,9 @@ def bulk_process_members():
             # 2. Send outreach email with portal link
             email_sent = False
             email_error_msg = ""
+            logger.info(f"[BULK-OUTREACH] {mid}: memail={memail!r}")
+            if not memail:
+                email_error_msg = "no email address provided"
             if memail:
                 try:
                     from azure.communication.email import EmailClient
@@ -2683,6 +2686,9 @@ def bulk_process_members():
                     from src.care_gap_neo4j import merge_email, merge_outreach, get_member_open_gaps as _get_gaps
 
                     open_gaps = _get_gaps(mid)
+                    logger.info(f"[BULK-OUTREACH] {mid}: open_gaps count={len(open_gaps) if open_gaps else 0}")
+                    if not open_gaps:
+                        email_error_msg = "no open care gaps in DB at email-send time"
                     if open_gaps:
                         portal_url = get_portal_url(mid)
 
@@ -2757,6 +2763,9 @@ def bulk_process_members():
 
                         conn_str = cfg.azure_communication_connection_string
                         sender = cfg.azure_communication_sender
+                        logger.info(f"[BULK-OUTREACH] {mid}: conn_str_set={bool(conn_str)} sender={sender!r}")
+                        if not (conn_str and sender):
+                            email_error_msg = f"ACS not configured (conn_str_set={bool(conn_str)}, sender_set={bool(sender)})"
                         if conn_str and sender:
                             client = EmailClient.from_connection_string(conn_str)
                             message = {
