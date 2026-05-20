@@ -120,6 +120,20 @@ def get_open_gaps(member_id):
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/v1/_diag/acs", methods=["GET"])
+def _diag_acs():
+    """Diagnostic: returns whether the ACS env var is visible to the app.
+    Returns only LENGTH, never the actual value — safe to expose."""
+    import os
+    from config.settings import settings as cfg
+    return jsonify({
+        "env_raw_len": len(os.environ.get("AZURE_COMMUNICATION_CONNECTION_STRING", "")),
+        "cfg_len": len(cfg.azure_communication_connection_string or ""),
+        "sender_env": bool(os.environ.get("AZURE_COMMUNICATION_SENDER")),
+        "sender_cfg": bool(cfg.azure_communication_sender),
+    })
+
+
 @app.route("/api/v1/members", methods=["GET"])
 def get_all_members():
     """Get all members with their care gap status and outreach info."""
