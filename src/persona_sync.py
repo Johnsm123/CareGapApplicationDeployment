@@ -17,9 +17,23 @@ Lifecycle stages stored on CareGap nodes:
           outreach_sent  | appointment_booked | gap_closed
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    """Timezone-aware UTC timestamp (e.g. '2026-05-31T08:01:00+00:00').
+
+    The frontend lifecycle timeline renders each stage with `new Date(t)`,
+    which interprets a tz-less ISO string as *browser-local* time. Writing a
+    naive `datetime.now().isoformat()` from a UTC server therefore made the
+    early stages (gap_identified / analysis_* / outreach_sent) display shifted
+    back by the viewer's UTC offset. Emitting a tz-aware UTC string — exactly
+    like Neo4j's `datetime()` used for appointment_booked — lets `new Date()`
+    convert correctly to local time for every stage.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _ref():
@@ -60,7 +74,7 @@ def sync_member_persona(member_id: str, name: str, dob: str, gender: str,
     Called after a member is added / updated in the original DB.
     """
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     # Calculate age_years from age_str (e.g. "45 Years, 3 Months")
     age_years = 0
@@ -207,7 +221,7 @@ def sync_care_gap(member_id: str, care_gap_id: str, measure_id: str,
     outreach_sent / appointment_booked / gap_closed.
     """
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     # Measure node
     ref.execute_write("""
@@ -262,7 +276,7 @@ def sync_compliant_measure(member_id: str, measure_id: str, measure_name: str,
     unified view, exactly matching what the rulebook says.
     """
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
     sd = (screening_date or "")[:10]
     iso_date = (sd + "T00:00:00") if sd else now
 
@@ -357,7 +371,7 @@ def _find_screening_date_from_claims(measure: dict, claims: list) -> str:
 def sync_analysis_started(member_id: str, care_gap_id: str = None):
     """Mark that agent analysis has started for a member's care gaps."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     if care_gap_id:
         ref.execute_write("""
@@ -379,7 +393,7 @@ def sync_analysis_complete(member_id: str, care_gap_id: str = None,
                            summary: str = ""):
     """Mark that analysis is complete for a member's care gaps."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     if care_gap_id:
         ref.execute_write("""
@@ -411,7 +425,7 @@ def sync_outreach_sent(member_id: str, care_gap_id: str = None,
                        channel: str = "Email"):
     """Mark that outreach has been sent."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     if care_gap_id:
         ref.execute_write("""
@@ -449,7 +463,7 @@ def sync_appointment_booked(member_id: str, care_gap_id: str,
     overwrite the booking time with the page-view time.
     """
     ref = _ref()
-    now = booked_at or datetime.now().isoformat()
+    now = booked_at or _now_iso()
 
     # Verify the gap exists first
     check = ref.run_query(
@@ -490,7 +504,7 @@ def sync_appointment_cancelled(member_id: str, care_gap_id: str,
                                cancelled_by: str = "member"):
     """Record an appointment cancellation in the reference DB so the timeline reflects it."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     if care_gap_id:
         ref.execute_write("""
@@ -511,7 +525,7 @@ def sync_appointment_no_show(member_id: str, care_gap_id: str,
                              appointment_id: str = "", appointment_date: str = ""):
     """Record a no-show event in the reference DB timeline."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     if care_gap_id:
         ref.execute_write("""
@@ -531,7 +545,7 @@ def sync_appointment_no_show(member_id: str, care_gap_id: str,
 def sync_gap_closed(member_id: str, care_gap_id: str):
     """Mark a care gap as closed."""
     ref = _ref()
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     # Verify the gap exists; create if missing
     check = ref.run_query(
@@ -713,7 +727,7 @@ def _add_action(care_gap_id: str, action_type: str, description: str,
     import uuid
     ref = _ref()
     action_id = f"ACT-{action_type[:4].upper()}-{uuid.uuid4().hex[:6]}"
-    now = datetime.now().isoformat()
+    now = _now_iso()
 
     ref.execute_write("""
         MATCH (g:CareGap {gap_id: $gid})
