@@ -14,17 +14,16 @@ import './Dashboard.css';
 import { API_BASE, API_HOST } from '../lib/apiBase';
 const PAGE_SIZE = 12;
 
-// Demo scope — Critical / Needs Attention / Compliant filters and the
-// matching counts only consider open gaps for these three cancer-screening
-// measures. To broaden the demo, add measure IDs here.
-const DEMO_MEASURE_IDS = new Set(['BCS', 'CCS', 'COL']);
-
-// Per-member demo-scope open-gap count. Prefers `open_gap_measures` (an
-// array on the member object); falls back to `m.open_gaps` if the array
-// isn't available (older /members responses).
+// Per-member open-gap count across ALL measures the backend reports.
+// Critical / Needs Attention / Compliant tabs + their counts all use this,
+// so a member is only "Compliant" when they have ZERO open gaps of any
+// measure. Previously this filtered to BCS/CCS/COL only, which let a member
+// whose sole open gap was another measure (e.g. AAP) sit in Compliant while
+// their card badge showed "1 Open Gap". Prefers the `open_gap_measures`
+// array; falls back to the `open_gaps` integer for older /members responses.
 const demoOpenGapCount = (m) => {
   const list = Array.isArray(m?.open_gap_measures) ? m.open_gap_measures : null;
-  if (list) return list.filter(x => DEMO_MEASURE_IDS.has(x)).length;
+  if (list) return list.length;
   return m?.open_gaps || 0;
 };
 
@@ -587,7 +586,12 @@ function Dashboard({ onMemberSelect }) {
                         <h3 className="tile-name">{member.name}</h3>
                         <span className="tile-id">{member.member_id}</span>
                       </div>
-                      <GapBadge gaps={member.open_gaps} />
+                      {/* Use the same demo-scoped count (BCS/CCS/COL only)
+                          that drives the Critical/Needs-Attention/Compliant
+                          tabs. Reading raw member.open_gaps here made a member
+                          whose only gap is out-of-demo-scope (e.g. AAP) show
+                          "1 Open Gap" while sitting in the Compliant tab. */}
+                      <GapBadge gaps={demoOpenGapCount(member)} />
                     </div>
 
                     <div className="tile-meta">
