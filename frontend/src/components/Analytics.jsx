@@ -119,10 +119,13 @@ function Analytics() {
     { name: 'Closed Gaps', value: members.reduce((sum, m) => sum + (m.closed_gaps || 0), 0) }
   ];
 
+  const outreachTotal     = stats?.outreach_stats?.total_outreach || 0;
+  const outreachCompleted = stats?.outreach_stats?.completed || 0;
   const outreachData = [
-    { name: 'Total', value: stats?.outreach_stats?.total_outreach || 0 },
-    { name: 'Completed', value: stats?.outreach_stats?.completed || 0 },
-    { name: 'Scheduled', value: stats?.outreach_stats?.scheduled || 0 }
+    { name: 'Total',         value: outreachTotal,                                  color: COLORS.purple },
+    { name: 'Completed',     value: outreachCompleted,                              color: COLORS.success },
+    { name: 'Not Completed', value: Math.max(0, outreachTotal - outreachCompleted), color: COLORS.danger },
+    { name: 'Scheduled',     value: stats?.outreach_stats?.scheduled || 0,          color: COLORS.warning }
   ];
 
   const topMembersWithGaps = members
@@ -254,7 +257,11 @@ function Analytics() {
               <XAxis dataKey="name" stroke="#64748b" />
               <YAxis stroke="#64748b" />
               <Tooltip contentStyle={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
-              <Bar dataKey="value" fill={COLORS.purple} radius={[8, 8, 0, 0]} />
+              <Bar dataKey="value" radius={[8, 8, 0, 0]}>
+                {outreachData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
