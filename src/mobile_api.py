@@ -469,11 +469,12 @@ def _perform_booking(member_id: str, data: dict, source: str = "manual") -> dict
         cpt_codes, icd_codes = "", ""
 
     measure_name = data.get("measure_name") or measure_id
-    appointment_id = f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}"
     care_gap_id = data.get("care_gap_id", "")
 
-    merge_appointment(
-        appointment_id=appointment_id,
+    # merge_appointment returns the EXISTING appointment's id when this exact
+    # slot was already booked for the gap (double-tap / retry guard).
+    appointment_id = merge_appointment(
+        appointment_id=f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}",
         member_id=member_id,
         measure_id=measure_id,
         appointment_date=appt_date,

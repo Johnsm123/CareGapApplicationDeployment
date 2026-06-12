@@ -312,6 +312,24 @@ def get_next_member_id():
     return f"M{str(next_num).zfill(pad)}"
 
 
+def find_member_by_identity(name: str, dob: str, gender: str):
+    """Return the member_id of an existing Member with the same identity
+    (case-insensitive name + dob + gender), or None. Used by bulk upload to
+    avoid creating duplicate Member nodes when the same file is re-uploaded.
+    """
+    kg = get_knowledge_graph()
+    rows = kg.run_query("""
+        MATCH (m:Member)
+        WHERE toLower(trim(m.name)) = toLower(trim($name))
+          AND m.dob = $dob
+          AND toUpper(coalesce(m.gender, '')) = toUpper($gender)
+        RETURN m.member_id AS member_id
+        ORDER BY m.member_id
+        LIMIT 1
+    """, {"name": name or "", "dob": str(dob or ""), "gender": gender or ""})
+    return rows[0]["member_id"] if rows else None
+
+
 def merge_member(member_id, name, dob, gender, pcp_id, zip_code,
                  enrollment_start, enrollment_end, age_str,
                  email="", phone="", street_address="", city="", state="",
@@ -468,7 +486,32 @@ def merge_care_gap(care_gap_id, member_id, measure_id, gap_status, is_open,
 
 def merge_outreach(outreach_id, care_gap_id, member_id, care_manager_id,
                    channel, date, status):
+    """Create (or update) an Outreach node.
+
+    Returns the canonical outreach_id. When the supplied outreach_id is NEW
+    but an outreach for the same (member, gap, channel, day) already exists
+    — e.g. a re-submitted portal booking form — no duplicate node is created
+    and the existing outreach's id is returned. Updating an EXISTING node by
+    its own id (e.g. flipping status to Completed) still works as before.
+    """
     kg = get_knowledge_graph()
+    same_id = kg.run_query(
+        "MATCH (o:Outreach {outreach_id: $oid}) RETURN o.outreach_id AS oid LIMIT 1",
+        {"oid": outreach_id})
+    if not same_id:
+        dup = kg.run_query("""
+            MATCH (o:Outreach)-[:CONTACTS]->(m:Member {member_id: $member_id})
+            OPTIONAL MATCH (o)-[:TARGETS]->(g:CareGap)
+            WITH o, coalesce(g.care_gap_id, '') AS gid
+            WHERE gid = $care_gap_id
+              AND o.channel = $channel
+              AND substring(coalesce(o.date, ''), 0, 10) = substring($date, 0, 10)
+            RETURN o.outreach_id AS outreach_id
+            LIMIT 1
+        """, {"member_id": member_id, "care_gap_id": care_gap_id or "",
+              "channel": channel, "date": str(date or "")})
+        if dup:
+            return dup[0]["outreach_id"]
     kg.execute_write("""
         MERGE (o:Outreach {outreach_id: $outreach_id})
         SET o.channel = $channel,
@@ -489,6 +532,7 @@ def merge_outreach(outreach_id, care_gap_id, member_id, care_manager_id,
         MATCH (m:Member {member_id: $member_id})
         MERGE (o)-[:CONTACTS]->(m)
     """, {"outreach_id": outreach_id, "member_id": member_id})
+    return outreach_id
 
 
 # ── Query helpers used by agents ──────────────────────────────────────────────
@@ -837,9 +881,31 @@ def merge_appointment(appointment_id: str, member_id: str, measure_id: str,
                       lab_number: str, lab_specialist: str, lab_location: str,
                       screening_name: str, cpt_codes: str, icd_codes: str,
                       provider_id: str, status: str = "Scheduled",
-                      care_gap_id: str = ""):
-    """Store an Appointment node and link it to Member and QualityMeasure."""
+                      care_gap_id: str = "") -> str:
+    """Store an Appointment node and link it to Member and QualityMeasure.
+
+    Returns the canonical appointment_id. If an appointment for the same
+    (member, measure, care gap, date, time) slot already exists — e.g. the
+    member double-submitted the portal booking form — no second node is
+    created and the existing appointment's id is returned, so callers must
+    use the return value rather than the id they generated.
+    """
     kg = get_knowledge_graph()
+    existing = kg.run_query("""
+        MATCH (m:Member {member_id: $member_id})-[:HAS_APPOINTMENT]->(a:Appointment)
+        WHERE a.appointment_id <> $appointment_id
+          AND a.measure_id = $measure_id
+          AND coalesce(a.care_gap_id, '') = $care_gap_id
+          AND a.appointment_date = $appointment_date
+          AND a.appointment_time = $appointment_time
+        RETURN a.appointment_id AS appointment_id
+        LIMIT 1
+    """, {"member_id": member_id, "appointment_id": appointment_id,
+          "measure_id": measure_id, "care_gap_id": care_gap_id or "",
+          "appointment_date": appointment_date,
+          "appointment_time": appointment_time})
+    if existing:
+        return existing[0]["appointment_id"]
     kg.execute_write("""
         MERGE (a:Appointment {appointment_id: $appointment_id})
         SET a.member_id        = $member_id,
@@ -873,6 +939,7 @@ def merge_appointment(appointment_id: str, member_id: str, measure_id: str,
         MATCH (a:Appointment {appointment_id: $appointment_id})
         MERGE (a)-[:FOR_MEASURE]->(q)
     """, {"measure_id": measure_id, "appointment_id": appointment_id})
+    return appointment_id
 
 
 def get_appointment(appointment_id: str):

@@ -648,9 +648,10 @@ def book_appointment():
         cpt_codes, icd_codes = _get_hedis_codes(measure_id)
 
         # ── Persist to Neo4j ─────────────────────────────────────────────
-        appointment_id = f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}"
-        merge_appointment(
-            appointment_id=appointment_id,
+        # merge_appointment returns the EXISTING appointment's id when this
+        # exact slot was already booked for the gap (double-submit guard).
+        appointment_id = merge_appointment(
+            appointment_id=f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}",
             member_id=member_id,
             measure_id=measure_id,
             appointment_date=appt_date,
@@ -2264,12 +2265,15 @@ def set_default_email():
 
 # ── Bulk Upload endpoints ───────────────────────────���────────────────────────
 
-@app.route("/api/v1/members/bulk-upload", methods=["POST"])
-def bulk_upload_members():
-    """
-    Parse an uploaded Excel file, create Member nodes, detect care gaps for
-    each member (pure Python — no LLM), and return a preview so the care
-    manager can approve before triggering the full agent analysis + email.
+def _iter_bulk_upload_rows(df):
+    """Shared bulk-upload row processor used by BOTH the classic JSON route
+    and the streaming NDJSON route.
+
+    Generator: yields progress-event dicts ({stage, message, index, ...})
+    while processing each Excel row — member_start, step (create / duplicate /
+    record / prior / gaps / gaps_done / persona / persona_ai / persona_twin),
+    member_done / member_error, cleanup — and finally yields
+    {"stage": "_results", "results": [...]} carrying the member payloads.
 
     Expected Excel columns (REQUIRED in CAPS, OPTIONAL extended in italics):
       Name, DOB, Gender, Email, Phone, PCPID, PlanID, ZIP,
@@ -2288,14 +2292,11 @@ def bulk_upload_members():
       Allergies -> "substance|severity|reaction;..."
       Medications -> "name|dose|started|purpose;..."
       Immunizations -> "name|year;..."
-
-    Returns JSON with a list of members and their detected gaps.
     """
-    import pandas as pd
     from datetime import datetime as _dt
     from src.care_gap_neo4j import (
         merge_member, merge_enrollment, get_next_member_id,
-        get_member_open_gaps, get_member_profile,
+        get_member_open_gaps, get_member_profile, find_member_by_identity,
     )
     from src.care_gap_agents import detect_care_gaps
 
@@ -2350,32 +2351,31 @@ def bulk_upload_members():
                 out.append(item)
         return out
 
-    if "file" not in request.files:
-        return jsonify({"status": "error", "error": "No file uploaded. Use form field name 'file'."}), 400
-
-    f = request.files["file"]
-    if not f.filename.endswith((".xlsx", ".xls")):
-        return jsonify({"status": "error", "error": "Only .xlsx or .xls files are accepted."}), 400
-
-    try:
-        df = pd.read_excel(f, sheet_name=0)
-        df = df.dropna(how="all").dropna(axis=1, how="all")
-    except Exception as exc:
-        return jsonify({"status": "error", "error": f"Could not read Excel file: {exc}"}), 400
-
-    required_cols = {"Name", "DOB", "Gender", "Email"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        return jsonify({"status": "error", "error": f"Missing required columns: {', '.join(sorted(missing))}"}), 400
-
     results = []
-    for _, row in df.iterrows():
+    total = int(len(df))
+    for _idx, (_, row) in enumerate(df.iterrows()):
         try:
-            # Auto-assign member ID
-            member_id = get_next_member_id()
             name = str(row["Name"]).strip()
             dob = str(row["DOB"]).strip()[:10]
             gender = str(row["Gender"]).strip()[:1].upper()
+            yield {"stage": "member_start", "index": _idx, "total": total,
+                   "name": name, "message": f"Uploading {name}…"}
+
+            # Duplicate guard — if a member with the same identity (name +
+            # DOB + gender) already exists (e.g. the same file re-uploaded),
+            # reuse their member_id and refresh the record instead of
+            # creating a twin Member node.
+            existing_id = find_member_by_identity(name, dob, gender)
+            is_duplicate = bool(existing_id)
+            member_id = existing_id or get_next_member_id()
+            if is_duplicate:
+                yield {"stage": "step", "step": "duplicate", "index": _idx,
+                       "name": name, "member_id": member_id,
+                       "message": f"Already in DB as {member_id} — updating existing record (no duplicate created)"}
+            else:
+                yield {"stage": "step", "step": "create", "index": _idx,
+                       "name": name, "member_id": member_id,
+                       "message": "Creating member record & enrollment…"}
             email = str(row.get("Email", "ajohnsm2020@gmail.com")).strip()
             phone = str(row.get("Phone", "")).strip()
             pcp_id = str(row.get("PCPID", "P1000")).strip()
@@ -2418,6 +2418,10 @@ def bulk_upload_members():
                 member_id=member_id, plan_id=plan_id,
                 pcp_id=pcp_id, effective_from=enrollment_start, effective_to=enrollment_end,
             )
+
+            yield {"stage": "step", "step": "record", "index": _idx,
+                   "name": name, "member_id": member_id,
+                   "message": "Writing patient record — lifestyle, family & medical history…"}
 
             # ── Extended patient record (optional columns) ──────────────────
             height_cm = _num(row, "HeightCm")
@@ -2464,6 +2468,9 @@ def bulk_upload_members():
             prior_screenings_map: dict = {}
             prior_raw = str(row.get("PriorScreenings", "")).strip()
             if prior_raw and prior_raw.lower() != "nan":
+                yield {"stage": "step", "step": "prior", "index": _idx,
+                       "name": name, "member_id": member_id,
+                       "message": "Loading prior screenings as completed claims…"}
                 from src.hedis_golden_reference import HEDIS_MEASURES
                 from src.care_gap_neo4j import merge_claim
                 for entry in prior_raw.split(";"):
@@ -2491,9 +2498,17 @@ def bulk_upload_members():
                     logger.info(f"[BULK] Prior screening claim created: {claim_id} ({mid_part} on {svc_date})")
 
             # Detect care gaps (pure Python — fast)
+            yield {"stage": "step", "step": "gaps", "index": _idx,
+                   "name": name, "member_id": member_id,
+                   "message": "Analyzing care gaps against the HEDIS golden rulebook…"}
             gap_result = detect_care_gaps(member_id)
             open_gaps = get_member_open_gaps(member_id)
             profile = get_member_profile(member_id)
+            _n_open = len(open_gaps or [])
+            _n_comp = len(gap_result.get("compliant") or [])
+            yield {"stage": "step", "step": "gaps_done", "index": _idx,
+                   "name": name, "member_id": member_id, "gaps_found": _n_open,
+                   "message": f"{_n_open} open care gap(s) found · {_n_comp} measure(s) already compliant"}
 
             # Build the "completed" list once — every measure the rulebook
             # marked compliant becomes a closed gap in ref DB + a completed
@@ -2521,6 +2536,9 @@ def bulk_upload_members():
                 })
 
             # ── Sync persona to reference DB for visualization ──────
+            yield {"stage": "step", "step": "persona", "index": _idx,
+                   "name": name, "member_id": member_id,
+                   "message": "Syncing persona & care-gap lifecycle graph…"}
             try:
                 from src.persona_sync import (
                     sync_member_persona, sync_care_gap, reset_member_care_gaps,
@@ -2559,6 +2577,9 @@ def bulk_upload_members():
             # ── Persona reasoning: LLM-generated 'why this persona matches' ──
             # Same flow as care-gap reason analysis but for the Persona node;
             # the tooltip on the Persona node in the lifecycle graph displays it.
+            yield {"stage": "step", "step": "persona_ai", "index": _idx,
+                   "name": name, "member_id": member_id,
+                   "message": "AI persona matching — generating reasoning for the best-fit persona…"}
             try:
                 from src.persona_reason import generate_persona_reason
                 from src.persona_sync import set_persona_reasoning
@@ -2583,6 +2604,9 @@ def bulk_upload_members():
             # ── Persona-Demo DB: write Member + IdealPersona relationship ──
             # Happens during INITIAL bulk upload (not after outreach), so the
             # persona DB stays in sync with what's in main + reference DBs.
+            yield {"stage": "step", "step": "persona_twin", "index": _idx,
+                   "name": name, "member_id": member_id,
+                   "message": "Finding the closest-fit ideal persona twin…"}
             try:
                 from src.persona_demo_writer import (
                     build_persona_comparison as _bpc,
@@ -2622,16 +2646,25 @@ def bulk_upload_members():
                 "compliant": gap_result.get("compliant", []),
                 "excluded": gap_result.get("excluded", []),
                 "open_gaps": open_gaps,
+                "duplicate": is_duplicate,
             })
+            yield {"stage": "member_done", "index": _idx, "total": total,
+                   "name": name, "member_id": member_id,
+                   "duplicate": is_duplicate, "gaps_found": _n_open,
+                   "message": f"{name} ({member_id}) processed — {_n_open} open gap(s)"}
         except Exception as exc:
             logger.error(f"Bulk upload error for row {row.get('Name', '?')}: {exc}", exc_info=True)
             results.append({
                 "name": str(row.get("Name", "?")),
                 "error": str(exc),
             })
+            yield {"stage": "member_error", "index": _idx, "total": total,
+                   "name": str(row.get("Name", "?")), "error": str(exc),
+                   "message": f"Failed to process {row.get('Name', '?')}: {exc}"}
 
     # After bulk upload, run hygiene so every newly created CareGap has
     # canonical primary CPT/ICD codes from the golden reference.
+    yield {"stage": "cleanup", "message": "Finalizing care-gap CPT/ICD codes…"}
     try:
         from src.care_gap_cleanup import cleanup_all
         cleanup_stats = cleanup_all()
@@ -2639,11 +2672,85 @@ def bulk_upload_members():
     except Exception as exc:
         logger.warning(f"[BULK-UPLOAD] post-upload cleanup skipped: {exc}")
 
+    yield {"stage": "_results", "results": results}
+
+
+def _read_bulk_upload_excel():
+    """Validate + parse the uploaded Excel file from the current request.
+    Returns (df, None) on success or (None, (response, status)) on error."""
+    import pandas as pd
+    if "file" not in request.files:
+        return None, (jsonify({"status": "error", "error": "No file uploaded. Use form field name 'file'."}), 400)
+    f = request.files["file"]
+    if not f.filename.endswith((".xlsx", ".xls")):
+        return None, (jsonify({"status": "error", "error": "Only .xlsx or .xls files are accepted."}), 400)
+    try:
+        df = pd.read_excel(f, sheet_name=0)
+        df = df.dropna(how="all").dropna(axis=1, how="all")
+    except Exception as exc:
+        return None, (jsonify({"status": "error", "error": f"Could not read Excel file: {exc}"}), 400)
+    required_cols = {"Name", "DOB", "Gender", "Email"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        return None, (jsonify({"status": "error", "error": f"Missing required columns: {', '.join(sorted(missing))}"}), 400)
+    return df, None
+
+
+@app.route("/api/v1/members/bulk-upload", methods=["POST"])
+def bulk_upload_members():
+    """Classic JSON bulk upload (kept for API compatibility): parse an Excel
+    file, create/refresh Member nodes, detect care gaps, return a preview.
+    See _iter_bulk_upload_rows for the expected Excel columns."""
+    df, err = _read_bulk_upload_excel()
+    if err:
+        return err
+    results = []
+    for ev in _iter_bulk_upload_rows(df):
+        if ev.get("stage") == "_results":
+            results = ev["results"]
     return jsonify({
         "status": "success",
         "total_uploaded": len(results),
         "members": results,
     })
+
+
+@app.route("/api/v1/members/bulk-upload-stream", methods=["POST"])
+def bulk_upload_members_stream():
+    """Streaming bulk upload: emits one JSON object per line (NDJSON) so the
+    upload page can show live per-member progress — uploading, HEDIS rulebook
+    gap analysis, persona matching — alongside a real progress bar.
+
+    Event stream:
+      {"stage":"start","total":N}
+      {"stage":"member_start","index":i,"total":N,"name":...}
+      {"stage":"step","step":"create|duplicate|record|prior|gaps|gaps_done|persona|persona_ai|persona_twin",...}
+      {"stage":"member_done" | "member_error", ...}
+      {"stage":"cleanup", ...}
+      {"stage":"complete","status":"success","total_uploaded":N,"members":[...]}
+    """
+    df, err = _read_bulk_upload_excel()
+    if err:
+        return err
+
+    def generate():
+        yield json.dumps({"stage": "start", "total": int(len(df)),
+                          "message": f"File parsed — {int(len(df))} member(s) found"}) + "\n"
+        results = []
+        for ev in _iter_bulk_upload_rows(df):
+            if ev.get("stage") == "_results":
+                results = ev["results"]
+                continue
+            yield json.dumps(ev, default=str) + "\n"
+        yield json.dumps({
+            "stage": "complete", "status": "success",
+            "total_uploaded": len(results), "members": results,
+        }, default=str) + "\n"
+
+    return Response(stream_with_context(generate()),
+                    mimetype="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"})
 
 
 @app.route("/api/v1/members/bulk-process", methods=["POST"])
@@ -3386,8 +3493,34 @@ body{font-family:'Segoe UI',system-ui,Roboto,'Helvetica Neue',sans-serif;backgro
 .upload-btn:disabled{background:#97999B;color:#fff;cursor:not-allowed}
 .template-link{display:inline-block;margin-top:16px;color:#2F78C4;font-size:13px;text-decoration:underline;cursor:pointer}
 .progress-bar{display:none;margin:20px auto;width:80%;height:6px;background:#E8E8E6;border-radius:3px;overflow:hidden}
-.progress-bar .fill{height:100%;background:#000048;border-radius:3px;transition:width 0.5s}
+.progress-bar .fill{height:100%;background:linear-gradient(90deg,#000048,#2F78C4);border-radius:3px;transition:width 0.4s}
 .status-msg{text-align:center;margin:12px 0;font-size:14px;color:#53565A}
+
+/* Live upload progress feed — per-member pipeline status */
+.upload-feed{display:none;margin:18px auto 0;max-width:780px;text-align:left;max-height:340px;overflow-y:auto;background:#fff;border:1px solid #E8E8E6;border-radius:10px;padding:10px 14px;box-shadow:0 2px 10px rgba(0,0,72,0.06)}
+.upload-feed.show{display:block}
+.feed-overall{font-size:12.5px;font-weight:700;color:#000048;padding:4px 2px 10px;border-bottom:1px solid #F0F0EE;margin-bottom:8px;display:flex;justify-content:space-between}
+.feed-member{display:flex;gap:12px;padding:10px 6px;border-bottom:1px solid #F4F4F2;animation:feedIn .3s ease both}
+.feed-member:last-child{border-bottom:none}
+@keyframes feedIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.feed-avatar{width:34px;height:34px;border-radius:50%;background:#000048;color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
+.feed-avatar.done{background:#2DB81F}
+.feed-avatar.error{background:#B81F2D}
+.feed-info{flex:1;min-width:0}
+.feed-name-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.feed-name{font-weight:700;color:#000048;font-size:13.5px}
+.feed-mid{font-size:11px;color:#97999B;font-family:monospace}
+.feed-chip{font-size:10px;font-weight:700;padding:2px 9px;border-radius:999px;text-transform:uppercase;letter-spacing:.3px}
+.feed-chip.working{background:#EFF6FF;color:#2F78C4}
+.feed-chip.done{background:rgba(45,184,31,.12);color:#1F8A14}
+.feed-chip.dup{background:#FFF8E1;color:#9A7B00}
+.feed-chip.error{background:rgba(184,31,45,.1);color:#B81F2D}
+.feed-steps{margin-top:6px;display:flex;flex-wrap:wrap;gap:5px}
+.feed-step{font-size:11px;color:#53565A;background:#F7F7F5;border:1px solid #ECECEA;border-radius:999px;padding:2px 9px;display:inline-flex;align-items:center;gap:5px}
+.feed-step.donestep{color:#1F8A14;background:rgba(45,184,31,.07);border-color:rgba(45,184,31,.25)}
+.feed-step.active{color:#2F78C4;background:#EFF6FF;border-color:#BFDBFE}
+.feed-step .tick{font-weight:700}
+.feed-spinner{display:inline-block;width:10px;height:10px;border:2px solid #BFDBFE;border-top-color:#2F78C4;border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0}
 
 /* Preview popup (modal) */
 .modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,72,0.5);z-index:1000;align-items:center;justify-content:center}
@@ -3525,6 +3658,7 @@ body{font-family:'Segoe UI',system-ui,Roboto,'Helvetica Neue',sans-serif;backgro
   <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
   <div class="progress-pct" id="progressPct" style="display:none;text-align:center;font-size:13px;color:#000048;margin-top:6px;font-weight:600"></div>
   <div class="status-msg" id="statusMsg"></div>
+  <div class="upload-feed" id="uploadFeed"></div>
 </div>
 
 <!-- Preview Modal -->
@@ -3589,6 +3723,98 @@ area.addEventListener('drop',e=>{
 });
 document.getElementById('fileInput').addEventListener('change',handleFile);
 
+// ── Live upload feed state ──────────────────────────────────────────────
+const FEED_LABELS={create:'Member record',duplicate:'Updating existing record',
+  record:'Patient record',prior:'Prior screenings',gaps:'HEDIS gap analysis',
+  persona:'Lifecycle sync',persona_ai:'AI persona match',persona_twin:'Persona twin'};
+const STEP_FRACTION={create:0.15,duplicate:0.15,record:0.3,prior:0.4,gaps:0.5,
+  gaps_done:0.6,persona:0.7,persona_ai:0.85,persona_twin:0.95};
+let feedState={total:0,members:{},order:[],doneCount:0};
+
+function feedRender(){
+  const feed=document.getElementById('uploadFeed');
+  feed.classList.add('show');
+  let html=`<div class="feed-overall"><span>&#129516; Analyzing members…</span><span>${feedState.doneCount}/${feedState.total} completed</span></div>`;
+  for(const idx of feedState.order){
+    const m=feedState.members[idx];
+    const initials=(m.name||'?').split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+    const avatarCls=m.error?'error':(m.done?'done':'');
+    let chip;
+    if(m.error)chip='<span class="feed-chip error">Failed</span>';
+    else if(m.done)chip=`<span class="feed-chip done">&#10003; ${m.gapsFound||0} gap${m.gapsFound===1?'':'s'}</span>`;
+    else chip='<span class="feed-chip working">Processing…</span>';
+    const dupChip=m.duplicate?'<span class="feed-chip dup">existing — updated</span>':'';
+    let steps='';
+    m.steps.forEach((s,i)=>{
+      const active=(i===m.steps.length-1)&&!m.done&&!m.error;
+      steps+=`<span class="feed-step ${active?'active':'donestep'}">${active?'<span class="feed-spinner"></span>':'<span class="tick">&#10003;</span>'} ${s}</span>`;
+    });
+    html+=`<div class="feed-member"><div class="feed-avatar ${avatarCls}">${initials}</div>`+
+          `<div class="feed-info"><div class="feed-name-row"><span class="feed-name">${m.name||'—'}</span>`+
+          `<span class="feed-mid">${m.mid||''}</span>${chip}${dupChip}</div>`+
+          `<div class="feed-steps">${steps}</div></div></div>`;
+  }
+  feed.innerHTML=html;
+  feed.scrollTop=feed.scrollHeight;
+}
+
+function setBar(idx,frac,ui){
+  if(!feedState.total)return;
+  const p=Math.min(99,((idx+frac)/feedState.total)*100);
+  ui.fill.style.width=p.toFixed(1)+'%';
+  ui.pct.textContent=Math.floor(p)+'%';
+}
+
+function handleUploadEvent(ev,ui){
+  const msg=ui.msg;
+  if(ev.stage==='start'){
+    feedState.total=ev.total||0;
+    msg.textContent=ev.message||'';
+    feedRender();
+    return;
+  }
+  if(ev.stage==='member_start'){
+    feedState.members[ev.index]={name:ev.name,mid:'',steps:[],done:false,error:false,duplicate:false,gapsFound:0};
+    feedState.order.push(ev.index);
+    msg.textContent=ev.message||'';
+    feedRender();
+    setBar(ev.index,0.05,ui);
+    return;
+  }
+  const m=feedState.members[ev.index];
+  if(ev.stage==='step'&&m){
+    m.mid=ev.member_id||m.mid;
+    if(ev.step==='duplicate')m.duplicate=true;
+    if(ev.step==='gaps_done'){
+      m.gapsFound=ev.gaps_found||0;
+      if(m.steps.length)m.steps[m.steps.length-1]=`HEDIS gap analysis — ${m.gapsFound} found`;
+    }else{
+      m.steps.push(FEED_LABELS[ev.step]||ev.message||ev.step);
+    }
+    msg.textContent=`${ev.name}: ${ev.message||''}`;
+    feedRender();
+    setBar(ev.index,STEP_FRACTION[ev.step]!==undefined?STEP_FRACTION[ev.step]:0.5,ui);
+    return;
+  }
+  if(ev.stage==='member_done'&&m){
+    m.done=true;
+    if(ev.gaps_found!==undefined)m.gapsFound=ev.gaps_found;
+    feedState.doneCount++;
+    msg.textContent=ev.message||'';
+    feedRender();
+    setBar(ev.index,1,ui);
+    return;
+  }
+  if(ev.stage==='member_error'&&m){
+    m.error=true;
+    feedState.doneCount++;
+    feedRender();
+    setBar(ev.index,1,ui);
+    return;
+  }
+  if(ev.stage==='cleanup'){msg.textContent=ev.message||'Finalizing…';}
+}
+
 async function handleFile(){
   const file=document.getElementById('fileInput').files[0];
   if(!file)return;
@@ -3597,51 +3823,61 @@ async function handleFile(){
   const fill=document.getElementById('progressFill');
   const pct=document.getElementById('progressPct');
   const msg=document.getElementById('statusMsg');
+  const ui={fill,pct,msg};
 
   btn.disabled=true;btn.textContent='Uploading...';
   bar.style.display='block';
   pct.style.display='block';
-  msg.textContent='Uploading and analyzing patient data...';
+  msg.textContent='Uploading file…';
   msg.style.color='';
-
-  // Progressive bar: smoothly climbs to ~90% over ~45s with an asymptote so
-  // it never stalls. Snaps to 100% the moment the backend response arrives.
-  let progress=2;
-  fill.style.width=progress+'%';
-  pct.textContent=progress+'%';
-  const tick=setInterval(()=>{
-    // remaining-distance curve: bigger jumps early, smaller near 90%
-    const remaining=90-progress;
-    if(remaining<=0.5)return;
-    progress=Math.min(90,progress+Math.max(0.4,remaining*0.025));
-    fill.style.width=progress.toFixed(1)+'%';
-    pct.textContent=Math.floor(progress)+'%';
-  },400);
+  feedState={total:0,members:{},order:[],doneCount:0};
+  const feed=document.getElementById('uploadFeed');
+  feed.innerHTML='';feed.classList.remove('show');
+  fill.style.width='2%';pct.textContent='2%';
 
   const formData=new FormData();
   formData.append('file',file);
 
   try{
-    const res=await fetch('/api/v1/members/bulk-upload',{method:'POST',body:formData});
-    const data=await res.json();
-    clearInterval(tick);
-    fill.style.width='100%';
-    pct.textContent='100%';
-
-    if(data.status==='error'){
-      msg.textContent='Error: '+data.error;
-      msg.style.color='#dc3545';
-      btn.disabled=false;btn.textContent='Choose Excel File';
-      return;
+    // Streaming endpoint: one JSON event per line (NDJSON) with live
+    // per-member progress — upload, gap analysis, persona matching.
+    const res=await fetch('/api/v1/members/bulk-upload-stream',{method:'POST',body:formData});
+    const ctype=res.headers.get('content-type')||'';
+    if(ctype.includes('application/json')){
+      // Validation errors come back as plain JSON
+      const data=await res.json();
+      throw new Error(data.error||('Upload failed ('+res.status+')'));
     }
+    if(!res.ok||!res.body)throw new Error('Upload failed ('+res.status+')');
 
-    uploadedMembers=data.members||[];
-    msg.textContent=`Successfully processed ${data.total_uploaded} members. Opening preview...`;
+    const reader=res.body.getReader();
+    const decoder=new TextDecoder();
+    let buf='';let final=null;
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      buf+=decoder.decode(value,{stream:true});
+      let nl;
+      while((nl=buf.indexOf('\\n'))>=0){
+        const line=buf.slice(0,nl).trim();buf=buf.slice(nl+1);
+        if(!line)continue;
+        let ev;try{ev=JSON.parse(line);}catch(_){continue;}
+        if(ev.stage==='complete')final=ev;
+        else handleUploadEvent(ev,ui);
+      }
+    }
+    if(!final)throw new Error('Stream ended unexpectedly');
+
+    fill.style.width='100%';pct.textContent='100%';
+    uploadedMembers=final.members||[];
+    const dupCount=uploadedMembers.filter(m=>m.duplicate).length;
+    msg.textContent=`Successfully processed ${final.total_uploaded} member(s)`+
+      (dupCount?` — ${dupCount} already existed and were updated (no duplicates created)`:'')+
+      `. Opening preview...`;
     msg.style.color='#10b981';
 
-    setTimeout(()=>showPreview(uploadedMembers),500);
+    setTimeout(()=>showPreview(uploadedMembers),800);
   }catch(e){
-    clearInterval(tick);
     msg.textContent='Upload failed: '+e.message;msg.style.color='#dc3545';
   }
   btn.disabled=false;btn.textContent='Choose Excel File';

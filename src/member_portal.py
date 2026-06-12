@@ -532,9 +532,11 @@ def portal_book(member_id, token):
 
         cpt_codes, icd_codes = _get_hedis_codes(measure_id)
 
-        appointment_id = f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}"
-        merge_appointment(
-            appointment_id=appointment_id,
+        # merge_appointment returns the EXISTING appointment's id when this
+        # exact slot was already booked for the gap, so a re-submitted form
+        # (refresh / double-click) can never create duplicate appointments.
+        appointment_id = merge_appointment(
+            appointment_id=f"APT-{member_id}-{measure_id}-{uuid.uuid4().hex[:6].upper()}",
             member_id=member_id,
             measure_id=measure_id,
             appointment_date=appt_date,

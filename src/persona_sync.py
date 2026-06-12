@@ -723,7 +723,15 @@ def sync_all_existing_members(preserve_progress: bool = True):
 
 def _add_action(care_gap_id: str, action_type: str, description: str,
                 stage: str = ""):
-    """Add an Action node linked to a CareGap for lifecycle tracking."""
+    """Add an Action node linked to a CareGap for lifecycle tracking.
+
+    Idempotent: if an Action with the same (type, description) already hangs
+    off this gap, no new node is created. Re-sync / reconcile flows run on
+    every page load, so without this guard the lifecycle graph accumulates
+    one duplicate Action per view. Genuinely new events (e.g. a rebooked
+    appointment on a different date) have a different description and still
+    create a fresh node.
+    """
     import uuid
     ref = _ref()
     action_id = f"ACT-{action_type[:4].upper()}-{uuid.uuid4().hex[:6]}"
@@ -731,6 +739,9 @@ def _add_action(care_gap_id: str, action_type: str, description: str,
 
     ref.execute_write("""
         MATCH (g:CareGap {gap_id: $gid})
+        WHERE NOT EXISTS {
+            MATCH (g)-[:HAS_ACTION]->(:Action {type: $atype, description: $desc})
+        }
         CREATE (a:Action {
             action_id:   $aid,
             type:        $atype,
@@ -947,9 +958,20 @@ def get_member_lifecycle_graph(member_id: str):
                           "target": ms["measure_id"],
                           "type": "FOR_MEASURE"})
 
-        # Action nodes
+        # Action nodes — collapse duplicates: keep only the earliest Action
+        # per (type, description) so legacy duplicate rows never clutter the
+        # lifecycle visualization or the timeline.
         actions = sorted(row.get("actions") or [],
                          key=lambda a: a.get("timestamp", ""))
+        _seen_actions = set()
+        _deduped = []
+        for act in actions:
+            akey = (act.get("type", ""), act.get("description", ""))
+            if akey in _seen_actions:
+                continue
+            _seen_actions.add(akey)
+            _deduped.append(act)
+        actions = _deduped
         for act in actions:
             if not act or not act.get("action_id"):
                 continue

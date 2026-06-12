@@ -344,41 +344,48 @@ function Dashboard({ onMemberSelect }) {
   };
 
   // ── Filtering + sorting ───────────────────────────────────────────────────
-  const filtered = members
+  const matchesSearch = (m) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      (m.name       || '').toLowerCase().includes(q) ||
+      (m.member_id  || '').toLowerCase().includes(q) ||
+      (m.pcp_name   || '').toLowerCase().includes(q)
+    );
+  };
+
+  const matchesMeasure = (m) => {
+    if (measureFilter === 'all') return true;
+    // Source-of-truth: derive membership from the Knowledge-Explorer graph
+    // we already loaded (`graphs.members_graph.edges`). Every open gap is an
+    // OPEN_GAP edge from M:<member_id> → Q:<measure_id>. This works even when
+    // the /members endpoint was not redeployed with `open_gap_measures`.
+    // Fallback: if the explorer graph hasn't loaded yet, fall back to the
+    // stats roster. A member with multiple open measures matches whichever
+    // measure is currently selected.
+    const fromGraph = (graphs?.members_graph?.edges || [])
+      .filter(e => e.type === 'OPEN_GAP' && e.source === `M:${m.member_id}`)
+      .some(e => e.target === `Q:${measureFilter}`);
+    if (fromGraph) return true;
+    const measureRow = (stats?.gaps_by_measure || []).find(r => r.measure_id === measureFilter);
+    const memberIds  = measureRow?.member_ids || [];
+    if (memberIds.includes(m.member_id)) return true;
+    const list = m.open_gap_measures;
+    return Array.isArray(list) && list.includes(measureFilter);
+  };
+
+  // Search + measure filter applied FIRST, so the Critical / Needs Attention /
+  // Compliant / All tab counts always reflect the currently selected
+  // screening measure (e.g. "BCS (2)" → tabs show how those 2 split up).
+  const scoped = members.filter(matchesSearch).filter(matchesMeasure);
+
+  const filtered = scoped
     .filter(m => {
       const n = demoOpenGapCount(m);
       if (category === 'critical')  return n >= 3;
       if (category === 'moderate')  return n >= 1 && n < 3;
       if (category === 'compliant') return n === 0;
       return true;
-    })
-    .filter(m => {
-      if (!search) return true;
-      const q = search.toLowerCase();
-      return (
-        (m.name       || '').toLowerCase().includes(q) ||
-        (m.member_id  || '').toLowerCase().includes(q) ||
-        (m.pcp_name   || '').toLowerCase().includes(q)
-      );
-    })
-    .filter(m => {
-      if (measureFilter === 'all') return true;
-      // Source-of-truth: derive membership from the Knowledge-Explorer graph
-      // we already loaded (`graphs.members_graph.edges`). Every open gap is an
-      // OPEN_GAP edge from M:<member_id> → Q:<measure_id>. This works even when
-      // the /members endpoint was not redeployed with `open_gap_measures`.
-      // Fallback: if the explorer graph hasn't loaded yet, fall back to the
-      // stats roster. A member with multiple open measures matches whichever
-      // measure is currently selected.
-      const fromGraph = (graphs?.members_graph?.edges || [])
-        .filter(e => e.type === 'OPEN_GAP' && e.source === `M:${m.member_id}`)
-        .some(e => e.target === `Q:${measureFilter}`);
-      if (fromGraph) return true;
-      const measureRow = (stats?.gaps_by_measure || []).find(r => r.measure_id === measureFilter);
-      const memberIds  = measureRow?.member_ids || [];
-      if (memberIds.includes(m.member_id)) return true;
-      const list = m.open_gap_measures;
-      return Array.isArray(list) && list.includes(measureFilter);
     })
     .sort((a, b) => {
       if (sortBy === 'gaps_desc')  return b.open_gaps - a.open_gaps;
@@ -392,10 +399,10 @@ function Dashboard({ onMemberSelect }) {
   const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const counts = {
-    all:       members.length,
-    critical:  members.filter(m => demoOpenGapCount(m) >= 3).length,
-    moderate:  members.filter(m => { const n = demoOpenGapCount(m); return n >= 1 && n < 3; }).length,
-    compliant: members.filter(m => demoOpenGapCount(m) === 0).length,
+    all:       scoped.length,
+    critical:  scoped.filter(m => demoOpenGapCount(m) >= 3).length,
+    moderate:  scoped.filter(m => { const n = demoOpenGapCount(m); return n >= 1 && n < 3; }).length,
+    compliant: scoped.filter(m => demoOpenGapCount(m) === 0).length,
   };
 
   if (loading) {
