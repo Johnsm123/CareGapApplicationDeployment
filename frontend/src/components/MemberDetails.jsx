@@ -860,12 +860,8 @@ function MemberDetails({ member, onBack }) {
         >
           Appointments ({details?.appointments?.length || 0})
         </button>
-        <button
-          className={activeTab === "outreach" ? "active" : ""}
-          onClick={() => setActiveTab("outreach")}
-        >
-          Outreach History
-        </button>
+        {/* Outreach History tab removed per request — the timeline view is no
+            longer surfaced in the member panel. */}
         <button
           className="refresh-btn"
           onClick={fetchMemberDetails}
