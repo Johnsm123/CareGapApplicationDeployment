@@ -404,6 +404,10 @@ function MemberDetails({ member, onBack }) {
             cpt_codes: appt.cpt_codes,
             icd_codes: appt.icd_codes,
             status: appt.status,
+            // Claim details persisted once the screening is closed — lets the
+            // Booking Details modal show the real claim id after a refresh.
+            claim_id: appt.claim_id || "",
+            service_date: appt.service_date || "",
             member_email: appt.member_email,
             member_name: appt.member_name,
             plan_id: appt.plan_id,
@@ -1403,6 +1407,8 @@ function MemberDetails({ member, onBack }) {
                     cpt_codes: appt.cpt_codes,
                     icd_codes: appt.icd_codes,
                     status: appt.status,
+                    claim_id: appt.claim_id || "",
+                    service_date: appt.service_date || "",
                     member_email: appt.member_email,
                     member_name: appt.member_name,
                     plan_id: appt.plan_id,

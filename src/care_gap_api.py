@@ -281,6 +281,11 @@ def get_member_details(member_id):
             MATCH (m:Member {member_id: $member_id})-[:HAS_APPOINTMENT]->(a:Appointment)
             OPTIONAL MATCH (m)-[:ENROLLED_IN]->(b:BenefitPlan)
             OPTIONAL MATCH (m)-[:ASSIGNED_TO]->(p:Provider)
+            // Linked closed care gap carries the generated claim — used to
+            // backfill claim_id/codes for appointments closed before the
+            // claim was persisted onto the Appointment node itself.
+            OPTIONAL MATCH (g:CareGap {care_gap_id: a.care_gap_id})
+            OPTIONAL MATCH (cl:Claim {claim_id: coalesce(a.claim_id, g.claim_id)})
             RETURN a.appointment_id   AS appointment_id,
                    a.measure_id        AS measure_id,
                    a.appointment_date  AS appointment_date,
@@ -289,10 +294,12 @@ def get_member_details(member_id):
                    a.lab_specialist    AS lab_specialist,
                    a.lab_location      AS lab_location,
                    a.screening_name    AS screening_name,
-                   a.cpt_codes         AS cpt_codes,
-                   a.icd_codes         AS icd_codes,
+                   coalesce(a.cpt_codes, cl.cpt_code) AS cpt_codes,
+                   coalesce(a.icd_codes, cl.icd_code) AS icd_codes,
                    a.status            AS status,
                    a.care_gap_id       AS care_gap_id,
+                   coalesce(a.claim_id, g.claim_id)        AS claim_id,
+                   coalesce(a.service_date, g.closed_on, cl.service_date) AS service_date,
                    m.email             AS member_email,
                    m.name              AS member_name,
                    b.plan_id           AS plan_id,
@@ -911,10 +918,18 @@ def complete_appointment(appointment_id):
         from src.care_gap_neo4j import merge_outreach
         import uuid as _uuid
         kg = get_knowledge_graph()
+        # Persist the generated claim details onto the Appointment node so the
+        # member-panel Booking Details modal can show the claim id / codes once
+        # the screening is closed (instead of "Generated after screening complete").
         kg.execute_write("""
             MATCH (a:Appointment {appointment_id: $appt_id})
-            SET a.status = 'Completed'
-        """, {"appt_id": appointment_id})
+            SET a.status = 'Completed',
+                a.claim_id = $claim_id,
+                a.cpt_codes = $cpt,
+                a.icd_codes = $icd,
+                a.service_date = $svc
+        """, {"appt_id": appointment_id, "claim_id": claim_id,
+              "cpt": cpt_code, "icd": icd_code, "svc": service_date})
 
         # Create an Outreach record for this completed screening so the
         # dashboard "Outreach Activity" count increases when a gap is closed.
@@ -2180,11 +2195,21 @@ def force_close_appointment(appointment_id):
             plan_id=appt.get("plan_id", ""),
         )
 
-        # Mark appointment completed
+        # Mark appointment completed + persist the generated claim details onto
+        # the Appointment node so the Booking Details modal shows the claim id /
+        # codes after force-close (was always "Generated after screening complete").
         kg = get_knowledge_graph()
         kg.execute_write(
-            "MATCH (a:Appointment {appointment_id: $appt_id}) SET a.status = 'Completed'",
-            {"appt_id": appointment_id},
+            """
+            MATCH (a:Appointment {appointment_id: $appt_id})
+            SET a.status = 'Completed',
+                a.claim_id = $claim_id,
+                a.cpt_codes = $cpt,
+                a.icd_codes = $icd,
+                a.service_date = $svc
+            """,
+            {"appt_id": appointment_id, "claim_id": claim_id,
+             "cpt": cpt_code, "icd": icd_code, "svc": service_date},
         )
 
         # Create outreach record
