@@ -124,7 +124,7 @@ function Analytics() {
   const outreachData = [
     { name: 'Total',         value: outreachTotal,                                  color: COLORS.purple },
     { name: 'Completed',     value: outreachCompleted,                              color: COLORS.success },
-    { name: 'Not Completed', value: Math.max(0, outreachTotal - outreachCompleted), color: COLORS.danger },
+    { name: 'Yet to Schedule', value: Math.max(0, outreachTotal - outreachCompleted), color: COLORS.danger },
     { name: 'Scheduled',     value: stats?.outreach_stats?.scheduled || 0,          color: COLORS.warning }
   ];
 

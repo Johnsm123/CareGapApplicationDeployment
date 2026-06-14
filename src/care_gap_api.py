@@ -2571,6 +2571,17 @@ def _iter_bulk_upload_rows(df):
                         measure_name=_cm["measure_name"],
                         screening_date=_cm.get("service_date", ""),
                     )
+                # Bulk upload IS the analysis step (rule-engine gap detection +
+                # persona discovery + reasoning all ran above). Advance every
+                # open gap to analysis_complete so the member-panel timeline /
+                # lifecycle graph reflect that an analysis was performed, even
+                # before the care manager presses "Proceed with Outreach".
+                if open_gaps:
+                    from src.persona_sync import (
+                        sync_analysis_started as _sas, sync_analysis_complete as _sac,
+                    )
+                    _sas(member_id)
+                    _sac(member_id, summary="Care gaps confirmed from persona discovery.")
             except Exception as ps_err:
                 logger.warning(f"Persona sync failed for {member_id}: {ps_err}")
 
@@ -4813,6 +4824,62 @@ def reference_member_personas(member_id):
     """Return the persona + care-gap lifecycle sub-graph for a specific member."""
     try:
         from src.persona_sync import get_member_lifecycle_graph, sync_appointment_booked, sync_gap_closed
+
+        # ── Reconcile A0: analysis + outreach stage for OPEN gaps ─────────
+        # Self-heals the lifecycle stage from the facts in the main DB so the
+        # member-panel timeline / graph are never "stuck" behind reality:
+        #   • Every open gap reaches at least `analysis_complete` — gap
+        #     detection + persona discovery ran at upload time, so analysis
+        #     IS done even if the care manager never pressed "Proceed with
+        #     Outreach". (Fixes uploaded-but-no-outreach members showing only
+        #     "Gap Identified".)
+        #   • If the main DB has an Outreach node targeting the gap, the gap
+        #     advances to `outreach_sent` — so cards marked "Outreach Done"
+        #     match the panel timeline. (Fixes the card/panel mismatch.)
+        # Forward-only: gaps already at appointment_booked / gap_closed are
+        # left for the appointment reconcile below; we never downgrade.
+        _STAGE_RANK = {
+            "gap_identified": 0, "analysis_started": 1, "analysis_complete": 2,
+            "outreach_sent": 3, "appointment_cancelled": 3, "appointment_no_show": 3,
+            "appointment_booked": 4, "gap_closed": 5,
+        }
+        try:
+            kg = get_knowledge_graph()
+            from src.persona_sync import (
+                _ref as _ref_a0, sync_analysis_started as _sas_a0,
+                sync_analysis_complete as _sac_a0, sync_outreach_sent as _sos_a0,
+            )
+            ref_a0 = _ref_a0()
+            open_gap_rows = kg.run_query("""
+                MATCH (m:Member {member_id: $mid})-[:HAS_CARE_GAP]->(g:CareGap)
+                WHERE g.is_open = true
+                RETURN g.care_gap_id AS care_gap_id,
+                       count { (:Outreach)-[:TARGETS]->(g) } AS outreach_count
+            """, {"mid": member_id})
+            for og in open_gap_rows:
+                cgid = og.get("care_gap_id")
+                if not cgid:
+                    continue
+                chk = ref_a0.run_query(
+                    "MATCH (g:CareGap {gap_id: $gid}) RETURN g.stage AS stage",
+                    {"gid": cgid})
+                cur_stage = (chk[0]["stage"] if chk else "gap_identified")
+                cur_rank = _STAGE_RANK.get(cur_stage, 0)
+                # Don't touch gaps already at appointment_booked or beyond.
+                if cur_rank >= 4:
+                    continue
+                # Always ensure analysis_complete for open gaps.
+                if cur_rank < 2:
+                    _sas_a0(member_id, care_gap_id=cgid)
+                    _sac_a0(member_id, care_gap_id=cgid,
+                            summary="Care gaps confirmed from persona discovery.")
+                    cur_rank = 2
+                # If outreach happened in the main DB, advance to outreach_sent.
+                if (og.get("outreach_count") or 0) > 0 and cur_rank < 3:
+                    logger.info(f"[RECONCILE-A0] Advancing gap {cgid} to outreach_sent (main-DB outreach found)")
+                    _sos_a0(member_id, care_gap_id=cgid, channel="Email")
+        except Exception as a0_err:
+            logger.warning(f"[RECONCILE-A0] analysis/outreach reconcile failed for {member_id}: {a0_err}")
 
         # ── Reconcile: check original DB for appointments not yet synced ──
         try:
